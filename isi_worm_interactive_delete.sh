@@ -1,39 +1,16 @@
 #!/usr/bin/env bash
-  # Isilon/PowerScale Interactive WORM Delete Script (v1 + USER MENU ENHANCEMENT)
+  # ============================================================================
+  # Isilon/PowerScale Interactive WORM Delete Script
   #
-  # v1 includes:
-  # 1) Batch validation for folder/file exclusion lists (enter all, then summary table)
-  # 2) Robust file matching under BASE + subdirectories (whitespace -> wildcard)
-  # 3) If a DIRECTORY is entered in file exclusion list: minimal y/n confirm to exclude subtree
-  # 4) Owner/UID exclusion excludes ONLY files owned by UID (recursive under BASE)
-  # 5) Folder exclusions resolve directories only (so "2019" doesn't match *2019*.pdf)
-  # 6) Safer handling: MULTI matches are NOT auto-applied (warn + force R/C/A decision)
-  # 7) Candidate Review Phase:
-  #    - Writes exact candidate files to /tmp/<REQ>_candidate_files.txt
-  #    - Shows preview
-  #    - Requires operator to type CONFIRM, then YES to actually delete
+  # Safely deletes WORM-committed files via `isi worm files delete -f`.
+  # Interactive menu with five modes (delete by path, by base + exclusions,
+  # whole directory, directory + exclusions, exit). All destructive actions
+  # require a two-step CONFIRM + YES gate.
   #
-  # Enhancement added (NEW MENU OPTION 3):
-  # 8) Delete FILES + EMPTY FOLDERS for a SPECIFIC USER under a BASE path
-  #    - Validates target user/UID exists
-  #    - Supports folder/file exclusions inside BASE (same UX)
-  #    - Deletes ONLY files owned by target UID under BASE
-  #    - Optionally deletes EMPTY directories under BASE after deletion
-  #
-  # Enhancement added (OPTION 0 - v3):
-  # 9) Option 0 now offers a sub-menu:
-  #    S) Delete a SINGLE file by full path (original behavior)
-  #    M) Delete MULTIPLE files by full path (one per line)
-  #       - Validates each path before deletion
-  #       - Shows VALID / INVALID summary table
-  #       - Lets operator re-enter, continue, or abort when invalid entries exist
-  #       - Two-step CONFIRM + YES before any deletion
-  #       - Honors FAST / STRICT WORM check mode
-  #       - Logs all failures to /tmp
-  #
-  # WORM modes:
-  #   FAST   (default): attempt delete directly, log failures
-  #   STRICT           : precheck `isi worm files view`, delete COMMITTED only (slower)
+  # WORM modes (env: WORM_CHECK_MODE):
+  #   FAST   (default) - delete directly, log failures
+  #   STRICT           - precheck via `isi worm files view`, delete COMMITTED only
+  # ============================================================================
  
   set -euo pipefail
  
@@ -63,7 +40,6 @@
     done
   }
  
-  # Owner prompt: allows y/n OR direct owner/UID string
   ask_owner_or_yn() {
     local prompt="$1"
     local ans=""
@@ -119,14 +95,11 @@
  
   # ---------------- NORMALIZATION HELPERS ----------------
   normalize_token() {
-    # Convert one-or-more whitespace into wildcard '*'
-    # Example: "A  B   C.docx" => "A*B*C.docx"
     local s="$1"
     echo "$s" | sed 's/[[:space:]]\+/*/g'
   }
  
   clean_relpath() {
-    # Remove leading ./ and collapse /./ and trailing /
     local p="$1"
     p="${p#./}"
     p="${p%/}"
@@ -135,7 +108,6 @@
   }
  
   clean_path() {
-    # Clean absolute paths: remove /./ and trailing /
     local p="$1"
     p="${p%/}"
     while [[ "$p" == *"/./"* ]]; do p="${p//\/.\//\/}"; done
@@ -201,7 +173,6 @@
   }
  
   # ---------------- RESOLVERS ----------------
-  # Directory-only resolution for folder exclusion section
   resolve_dirs_only() {
     local base="$1" entry="$2"
     local -n out_dirs="$3"
@@ -228,7 +199,6 @@
     )
   }
  
-  # File-only resolution for file exclusion section (robust spacing)
   resolve_files_only() {
     local base="$1" entry="$2"
     local -n out_files="$3"
@@ -259,7 +229,6 @@
     )
   }
  
-  # Detect whether a "file exclusion" entry is actually a directory reference under BASE
   resolve_directory_reference_from_file_entry() {
     local base="$1" entry="$2"
  
@@ -293,7 +262,6 @@
     done
   }
  
-  # ---------- logging setup ----------
   read -r -p "Enter Request number (example: RITM5981027 or INC123456): " REQ
   [[ -n "${REQ:-}" ]] || die "Request number cannot be empty."
   SAFE_REQ="$(echo "$REQ" | tr -cd '[:alnum:]_-')"
@@ -304,7 +272,6 @@
     LOGFILE="${SCRIPT_DIR}/RITM_${SAFE_REQ}.log"
   fi
  
-  # Log to screen + logfile
   exec > >(tee -a "$LOGFILE") 2>&1
  
   echo "==============================================================="
@@ -327,7 +294,6 @@
     read -r -p "Enter the BASE folder path: " BASE
     [[ -n "${BASE:-}" ]] || { msg_no_input; return 1; }
  
-    # Convenience: if user forgets leading '/', try adding it
     if [[ "$BASE" != /* && -d "/$BASE" ]]; then
       BASE="/$BASE"
     fi
@@ -355,7 +321,45 @@
       declare -a EXCLUDE_FILES=()
       declare -a WARNINGS=()
  
-      # --- owner prompt ---
+      EX_OWNER_ON="yes"
+      EX_FOLDER_ON="yes"
+      EX_FILE_ON="yes"
+ 
+      if [[ "$MODE" == "2" ]]; then
+        EX_OWNER_ON="no"; EX_FOLDER_ON="no"; EX_FILE_ON="no"
+        echo "Mode 2 selected (Delete DIRECTORY Without Exclusion): skipping all exclusion prompts."
+        echo ""
+      fi
+ 
+      if [[ "$MODE" == "3" ]]; then
+        EX_OWNER_ON="no"; EX_FOLDER_ON="no"; EX_FILE_ON="no"
+        echo ""
+        echo "----------------------------------------------------------------"
+        echo "  OPTION 3 - Delete a Directory With Exclusions"
+        echo "----------------------------------------------------------------"
+        echo "  Wipes everything under your base folder, EXCEPT the items"
+        echo "  you tell us to skip."
+        echo ""
+        echo "  WHAT do you want to EXCLUDE from deletion?"
+        echo "    1) A specific user's files (by username/UID)"
+        echo "    2) Subfolder(s)            - entire subtree(s) preserved"
+        echo "    3) File(s)                 - single or multiple"
+        echo "    4) Mix of the above        - asks all three in order"
+        echo "    5) Back to MAIN MENU"
+        echo "----------------------------------------------------------------"
+        read -r -p "  Enter choice (1/2/3/4/5): " EX_CHOICE
+        echo ""
+        case "${EX_CHOICE:-}" in
+          1) EX_OWNER_ON="yes"  ;;
+          2) EX_FOLDER_ON="yes" ;;
+          3) EX_FILE_ON="yes"   ;;
+          4) EX_OWNER_ON="yes"; EX_FOLDER_ON="yes"; EX_FILE_ON="yes" ;;
+          5) echo "Returning to main menu..."; echo ""; return 0 ;;
+          *) echo "WARNING: Invalid choice [$EX_CHOICE]. Returning to main menu..."; echo ""; return 1 ;;
+        esac
+      fi
+ 
+      if [[ "$EX_OWNER_ON" == "yes" ]]; then
       ask_owner_or_yn "Exclude files owned by a user/UID?"
       if [[ "$OWNER_ANSWER_TYPE" == "OWNER" ]]; then
         EXCLUDE_OWNER_INPUT="$OWNER_ANSWER_VAL"
@@ -380,9 +384,15 @@
           echo ""
         fi
       fi
+      fi   # end EX_OWNER_ON
  
       # ---------- FOLDER EXCLUSIONS (BATCH) ----------
-      ask_yn_strict "Do you want to EXCLUDE folder(s) (entire subtree)?"
+      if [[ "$EX_FOLDER_ON" == "yes" ]]; then
+      if [[ "$MODE" == "3" ]]; then
+        YN_ANSWER="y"
+      else
+        ask_yn_strict "Do you want to EXCLUDE folder(s) (entire subtree)?"
+      fi
       if [[ "$YN_ANSWER" == "y" ]]; then
         echo "Enter folder exclusion entries (FULL path, relative-to-BASE, or folder name)."
         echo "One per line. Blank line to finish:"
@@ -414,9 +424,15 @@
         done
         echo ""
       fi
+      fi   # end EX_FOLDER_ON
  
       # ---------- FILE EXCLUSIONS (BATCH) ----------
-      ask_yn_strict "Do you want to EXCLUDE file(s)? (FULL path or filename/partial under BASE)"
+      if [[ "$EX_FILE_ON" == "yes" ]]; then
+      if [[ "$MODE" == "3" ]]; then
+        YN_ANSWER="y"
+      else
+        ask_yn_strict "Do you want to EXCLUDE file(s)? (FULL path or filename/partial under BASE)"
+      fi
       if [[ "$YN_ANSWER" == "y" ]]; then
         echo "Enter file exclusion entries (FULL path, relative-to-BASE, or filename/partial token)."
         echo "One per line. Blank line to finish:"
@@ -455,6 +471,7 @@
         done
         echo ""
       fi
+      fi   # end EX_FILE_ON
  
       echo ""
       echo "================ EXCLUSIONS (RESOLVED) ================"
@@ -499,7 +516,6 @@
       fi
     done
  
-    # -------- Candidate generation (post-exclusions) --------
     FIND_CMD=(find "$BASE" -xdev -type f)
  
     [[ -n "${EXCLUDE_OWNER_UID:-}" ]] && FIND_CMD+=( ! -uid "$EXCLUDE_OWNER_UID" )
@@ -517,7 +533,6 @@
  
     [[ "$TOTAL_FOUND" -gt 0 ]] || { echo "No candidate files found. Returning to menu."; echo ""; return 1; }
  
-    # -------- Candidate Review Phase --------
     CANDIDATE_LOG="/tmp/${SAFE_REQ}_candidate_files.txt"
     emit_candidates | tr '\0' '\n' > "$CANDIDATE_LOG"
  
@@ -544,7 +559,6 @@
       return 1
     fi
  
-    # Keep the classic YES gate as final safety check
     confirm_yes_or_menu || return 1
  
     echo ""
@@ -596,6 +610,28 @@
       echo "Attempting to remove BASE itself if empty..."
       rmdir "$BASE" 2>/dev/null || true
       echo "Directory cleanup done."
+    elif [[ "$MODE" == "3" ]]; then
+      echo ""
+      echo "Directory mode (with exclusion): removing EMPTY directories under BASE..."
+      echo "  (excluded folder subtrees are preserved)"
+      while IFS= read -r -d '' d; do
+        skip="no"
+        for ed in "${EXCLUDE_DIRS[@]}"; do
+          if [[ "$d" == "$ed" || "$d" == "$ed"/* ]]; then
+            skip="yes"; break
+          fi
+        done
+        [[ "$skip" == "yes" ]] && continue
+        rmdir "$d" 2>/dev/null || true
+      done < <(find "$BASE" -xdev -type d -empty -mindepth 1 -print0 2>/dev/null)
+
+      if [[ ${#EXCLUDE_DIRS[@]} -eq 0 && ${#EXCLUDE_FILES[@]} -eq 0 && -z "${EXCLUDE_OWNER_UID:-}" ]]; then
+        echo "No exclusions in effect — attempting to remove BASE itself if empty..."
+        rmdir "$BASE" 2>/dev/null || true
+      else
+        echo "Exclusions in effect — BASE retained (excluded items may still live under it)."
+      fi
+      echo "Directory cleanup done."
     fi
  
     echo ""
@@ -604,9 +640,6 @@
     return 0
   }
  
-  # ------------------------------------------------------------
-  # NEW FEATURE: Delete files (and optionally empty folders) for a SPECIFIC USER under BASE
-  # ------------------------------------------------------------
   run_user_delete() {
     read -r -p "Enter the BASE folder path: " BASE
     [[ -n "${BASE:-}" ]] || { msg_no_input; return 1; }
@@ -630,7 +663,6 @@
     echo "BASE selected: $BASE"
     echo ""
  
-    # ---- Target user ----
     read -r -p "Enter TARGET username (e.g. AP\\c270183) OR numeric UID (mandatory): " TARGET_OWNER_INPUT
     [[ -n "${TARGET_OWNER_INPUT:-}" ]] || { msg_no_input; return 1; }
  
@@ -767,7 +799,6 @@
       fi
     done
  
-    # ---- Candidate generation: ONLY files owned by target UID ----
     FIND_CMD=(find "$BASE" -xdev -type f -uid "$TARGET_UID")
  
     for xf in "${EXCLUDE_FILES[@]}"; do FIND_CMD+=( ! -path "$xf" ); done
@@ -784,7 +815,6 @@
  
     [[ "$TOTAL_FOUND" -gt 0 ]] || { echo "No candidate files found after exclusions. Returning to menu."; echo ""; return 1; }
  
-    # ---- Candidate Review Phase ----
     CANDIDATE_LOG="/tmp/${SAFE_REQ}_uid${TARGET_UID}_candidate_files.txt"
     emit_candidates | tr '\0' '\n' > "$CANDIDATE_LOG"
  
@@ -856,7 +886,6 @@
     fi
     echo ""
  
-    # ---- Optional empty directory cleanup ----
     ask_yn_strict "Do you want to remove EMPTY directories under BASE after deletion?"
     if [[ "$YN_ANSWER" == "y" ]]; then
       echo "Removing empty directories under BASE (excluding excluded subtrees)..."
@@ -878,8 +907,8 @@
     echo "==================== MAIN MENU ===================="
     echo "  0) Delete FILE(S) by FULL PATH - single or multiple"
     echo "  1) Delete FILES under a BASE path (With Exclusions)"
-    echo "  2) Delete a DIRECTORY (Without Exclusion)"
-    echo "  3) Delete a DIRECTORY (With Exclusion)"
+    echo "  2) Delete a DIRECTORY (Without Exclusion - removes everything under BASE)"
+    echo "  3) Delete a DIRECTORY (With Exclusion - by user/folder/file)"
     echo "  4) EXIT"
     echo "==================================================="
     read -r -p "Enter choice (0/1/2/3/4): " MODE
@@ -887,7 +916,6 @@
  
     case "$MODE" in
       0)
-        # ---------- Sub-menu: Single vs Multiple file deletion ----------
         echo ""
         echo "---------- FILE DELETE SUB-MENU ----------"
         echo "  S) Delete a SINGLE file (one full path)"
@@ -899,7 +927,6 @@
 
         case "${SUBCH^^}" in
           S)
-            # -------- SINGLE FILE DELETION --------
             read -r -p "Enter FULL file path to delete: " ONE_FILE
             [[ -n "${ONE_FILE:-}" ]] || { msg_no_input; continue; }
             [[ -f "$ONE_FILE" ]] || { echo "ERROR: Not a file or does not exist: $ONE_FILE"; echo ""; continue; }
@@ -918,7 +945,6 @@
             ;;
 
           M)
-            # -------- MULTIPLE FILE DELETION --------
             echo ""
             echo "Enter FULL file paths to delete, ONE PER LINE."
             echo "Blank line to finish input:"
@@ -927,7 +953,6 @@
             while true; do
               read -r mf_line
               [[ -z "${mf_line:-}" ]] && break
-              # Trim surrounding whitespace
               mf_line="${mf_line#"${mf_line%%[![:space:]]*}"}"
               mf_line="${mf_line%"${mf_line##*[![:space:]]}"}"
               [[ -z "${mf_line:-}" ]] && continue
@@ -940,7 +965,6 @@
               continue
             fi
 
-            # ---- Validate each path ----
             echo ""
             printf "%-65s %s\n" "File Path" "Status"
             printf "%-65s %s\n" "-----------------------------------------------------------------" "----------"
@@ -982,7 +1006,6 @@
               esac
             fi
 
-            # ---- Candidate Review Phase (consistent with other modes) ----
             MULTI_LOG="/tmp/${SAFE_REQ}_multi_delete_$(date +%Y%m%d_%H%M%S).txt"
             : > "$MULTI_LOG"
             for vf in "${VALID_FILES[@]}"; do echo "$vf" >> "$MULTI_LOG"; done
@@ -1012,7 +1035,6 @@
 
             confirm_yes_or_menu || continue
 
-            # ---- Perform deletion ----
             echo ""
             echo "Deleting ${#VALID_FILES[@]} file(s) now..."
             M_DELETED=0
@@ -1076,7 +1098,7 @@
         ;;
       1) run_base_delete "1" "FILES_ONLY" || true ;;
       2) run_base_delete "2" "DELETE_DIRECTORY" || true ;;
-      3) run_user_delete || true ;;
+      3) run_base_delete "3" "DELETE_DIRECTORY_WITH_EXCLUSION" || true ;;
       4)
         echo "Exiting. Log file: $LOGFILE"
         echo "Ended : $(date '+%Y-%m-%d %H:%M:%S %z')"
