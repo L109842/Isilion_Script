@@ -11,20 +11,20 @@
   #   FAST   (default) - delete directly, log failures
   #   STRICT           - precheck via `isi worm files view`, delete COMMITTED only
   # ============================================================================
- 
+
   set -euo pipefail
- 
+
   die(){ echo "ERROR: $*" >&2; exit 1; }
   [[ -n "${BASH_VERSION:-}" ]] || die "Run with bash"
- 
+
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
   WORM_CHECK_MODE="${WORM_CHECK_MODE:-FAST}"   # FAST|STRICT
- 
+
   # ---------------- GLOBAL ANSWERS ----------------
   YN_ANSWER=""          # "y"|"n"
   OWNER_ANSWER_TYPE=""  # "y"|"n"|"OWNER"
   OWNER_ANSWER_VAL=""   # owner string when OWNER_ANSWER_TYPE="OWNER"
- 
+
   # ---------------- STRICT y/n FUNCTION ----------------
   ask_yn_strict() {
     local prompt="$1"
@@ -39,7 +39,7 @@
       esac
     done
   }
- 
+
   ask_owner_or_yn() {
     local prompt="$1"
     local ans=""
@@ -48,7 +48,7 @@
       ans="${ans#"${ans%%[![:space:]]*}"}"
       ans="${ans%"${ans##*[![:space:]]}"}"
       [[ -z "${ans:-}" ]] && { echo "WARNING: Enter y, n, or a user/UID."; continue; }
- 
+
       case "${ans,,}" in
         y) OWNER_ANSWER_TYPE="y"; OWNER_ANSWER_VAL=""; return 0 ;;
         n) OWNER_ANSWER_TYPE="n"; OWNER_ANSWER_VAL=""; return 0 ;;
@@ -56,7 +56,7 @@
       esac
     done
   }
- 
+
   confirm_yes_or_menu(){
     local c=""
     echo ""
@@ -66,10 +66,10 @@
     echo ""
     return 1
   }
- 
+
   msg_no_input(){ echo "ERROR: No input provided. Returning to main menu..."; echo ""; }
   msg_abort(){ echo "ABORTED by operator. Returning to main menu..."; echo ""; }
- 
+
   append_unique() {
     local -n arr="$1"
     local val="$2"
@@ -77,7 +77,7 @@
     for x in "${arr[@]}"; do [[ "$x" == "$val" ]] && return 0; done
     arr+=("$val")
   }
- 
+
   print_list() {
     local -n arr="$1"
     if [[ ${#arr[@]} -eq 0 ]]; then
@@ -90,15 +90,15 @@
       done
     fi
   }
- 
+
   is_number(){ [[ "${1:-}" =~ ^[0-9]+$ ]]; }
- 
+
   # ---------------- NORMALIZATION HELPERS ----------------
   normalize_token() {
     local s="$1"
     echo "$s" | sed 's/[[:space:]]\+/*/g'
   }
- 
+
   clean_relpath() {
     local p="$1"
     p="${p#./}"
@@ -106,27 +106,27 @@
     while [[ "$p" == *"/./"* ]]; do p="${p//\/.\//\/}"; done
     echo "$p"
   }
- 
+
   clean_path() {
     local p="$1"
     p="${p%/}"
     while [[ "$p" == *"/./"* ]]; do p="${p//\/.\//\/}"; done
     echo "$p"
   }
- 
+
   # ---------------- OWNER VALIDATION ----------------
   OWNER_OK="0"
   OWNER_UID_RESOLVED=""
   OWNER_NAME_RESOLVED=""
- 
+
   validate_owner_or_uid() {
     local inp="$1"
     OWNER_OK="0"
     OWNER_UID_RESOLVED=""
     OWNER_NAME_RESOLVED=""
- 
+
     [[ -z "${inp:-}" ]] && return 1
- 
+
     if is_number "$inp"; then
       if getent passwd "$inp" >/dev/null 2>&1; then
         OWNER_UID_RESOLVED="$inp"
@@ -145,7 +145,7 @@
         OWNER_OK="1"
         return 0
       fi
- 
+
       if getent passwd "$inp" >/dev/null 2>&1; then
         OWNER_NAME_RESOLVED="$(getent passwd "$inp" | awk -F: '{print $1}' | head -n 1)"
         OWNER_UID_RESOLVED="$(getent passwd "$inp" | awk -F: '{print $3}' | head -n 1)"
@@ -154,14 +154,14 @@
       return 1
     fi
   }
- 
+
   count_owner_matches_by_uid() {
     local base="$1" uid="$2" c=0
     [[ -z "${uid:-}" ]] && { echo 0; return 0; }
     while IFS= read -r -d '' _; do ((c++)) || true; done < <(find "$base" -xdev -type f -uid "$uid" -print0 2>/dev/null || true)
     echo "$c"
   }
- 
+
   # ---------------- WORM HELPERS ----------------
   worm_state_of() {
     local file="$1"
@@ -171,20 +171,30 @@
     [[ -n "${state:-}" ]] || state="UNKNOWN"
     echo "$state"
   }
- 
+
+  # ---------------- HIGH-LEVEL PATH GUARD ----------------
+  is_high_level_path() {
+    case "$1" in
+      "/"|"/ifs"|"/ifs/"|"/ifs/data"|"/ifs/data/")
+        return 0 ;;
+      *)
+        return 1 ;;
+    esac
+  }
+
   # ---------------- RESOLVERS ----------------
   resolve_dirs_only() {
     local base="$1" entry="$2"
     local -n out_dirs="$3"
     out_dirs=()
- 
+
     entry="$(clean_relpath "$entry")"
- 
+
     if [[ "$entry" == /* ]]; then
       [[ -d "$entry" ]] && out_dirs+=("$(clean_path "$entry")")
       return 0
     fi
- 
+
     if [[ "$entry" == *"/"* ]]; then
       local candidate="$base/$entry"
       [[ -d "$candidate" ]] && out_dirs+=("$(clean_path "$candidate")")
@@ -193,26 +203,26 @@
       )
       return 0
     fi
- 
+
     while IFS= read -r -d '' d; do out_dirs+=("$(clean_path "$d")"); done < <(
       find "$base" -xdev -type d -iname "*$entry*" -print0 2>/dev/null || true
     )
   }
- 
+
   resolve_files_only() {
     local base="$1" entry="$2"
     local -n out_files="$3"
     out_files=()
- 
+
     entry="${entry#"${entry%%[![:space:]]*}"}"
     entry="${entry%"${entry##*[![:space:]]}"}"
     entry="$(clean_relpath "$entry")"
- 
+
     if [[ "$entry" == /* ]]; then
       [[ -f "$entry" ]] && out_files+=("$(clean_path "$entry")")
       return 0
     fi
- 
+
     if [[ "$entry" == *"/"* ]]; then
       local candidate="$base/$entry"
       [[ -f "$candidate" ]] && out_files+=("$(clean_path "$candidate")")
@@ -221,33 +231,33 @@
       )
       return 0
     fi
- 
+
     local token
     token="$(normalize_token "$entry")"
     while IFS= read -r -d '' f; do out_files+=("$(clean_path "$f")"); done < <(
       find "$base" -xdev -type f -iname "*$token*" -print0 2>/dev/null || true
     )
   }
- 
+
   resolve_directory_reference_from_file_entry() {
     local base="$1" entry="$2"
- 
+
     entry="${entry#"${entry%%[![:space:]]*}"}"
     entry="${entry%"${entry##*[![:space:]]}"}"
     entry="$(clean_relpath "$entry")"
- 
+
     if [[ "$entry" == /* ]]; then
       [[ -d "$entry" ]] && { echo "$(clean_path "$entry")"; return 0; }
       echo ""
       return 0
     fi
- 
+
     local candidate="$base/$entry"
     [[ -d "$candidate" ]] && { echo "$(clean_path "$candidate")"; return 0; }
- 
+
     echo ""
   }
- 
+
   confirm_directory_exclusion_minimal() {
     local dir="$1"
     local ans=""
@@ -261,19 +271,19 @@
       esac
     done
   }
- 
+
   read -r -p "Enter Request number (example: RITM5981027 or INC123456): " REQ
   [[ -n "${REQ:-}" ]] || die "Request number cannot be empty."
   SAFE_REQ="$(echo "$REQ" | tr -cd '[:alnum:]_-')"
- 
+
   if [[ "$SAFE_REQ" =~ ^(RITM|INC)[0-9]+$ ]]; then
     LOGFILE="${SCRIPT_DIR}/${SAFE_REQ}.log"
   else
     LOGFILE="${SCRIPT_DIR}/RITM_${SAFE_REQ}.log"
   fi
- 
+
   exec > >(tee -a "$LOGFILE") 2>&1
- 
+
   echo "==============================================================="
   echo "Isilon WORM Delete (v1 - candidate review + batch validation)"
   echo "Request   : $REQ"
@@ -284,35 +294,36 @@
   echo "WORM mode : $WORM_CHECK_MODE"
   echo "==============================================================="
   echo ""
- 
+
   read -r -p "Enter comments/notes for this request (optional, press Enter to skip): " USER_NOTE
   [[ -n "${USER_NOTE:-}" ]] && echo "NOTE: $USER_NOTE"
- 
+
+  # ============================================================================
+  # run_base_delete: Modes 1 (files+exclusions), 2 (dir wipe single), 3 (dir+excl)
+  # ============================================================================
   run_base_delete() {
     local MODE="$1" MODE_NAME="$2"
- 
+
     read -r -p "Enter the BASE folder path: " BASE
     [[ -n "${BASE:-}" ]] || { msg_no_input; return 1; }
- 
+
     if [[ "$BASE" != /* && -d "/$BASE" ]]; then
       BASE="/$BASE"
     fi
- 
+
     [[ -d "$BASE" ]] || { echo "ERROR: Base path does not exist or is not a directory: $BASE"; echo ""; return 1; }
     BASE="$(cd "$BASE" && pwd -P)"
- 
-    case "$BASE" in
-      "/"|"/ifs"|"/ifs/"|"/ifs/data"|"/ifs/data/")
-        echo "ERROR: Refusing to operate on high-level path: $BASE. Provide a deeper folder."
-        echo ""
-        return 1
-        ;;
-    esac
- 
+
+    if is_high_level_path "$BASE"; then
+      echo "ERROR: Refusing to operate on high-level path: $BASE. Provide a deeper folder."
+      echo ""
+      return 1
+    fi
+
     echo ""
     echo "BASE selected: $BASE"
     echo ""
- 
+
     while true; do
       EXCLUDE_OWNER_INPUT=""
       EXCLUDE_OWNER_UID=""
@@ -320,17 +331,17 @@
       declare -a EXCLUDE_DIRS=()
       declare -a EXCLUDE_FILES=()
       declare -a WARNINGS=()
- 
+
       EX_OWNER_ON="yes"
       EX_FOLDER_ON="yes"
       EX_FILE_ON="yes"
- 
+
       if [[ "$MODE" == "2" ]]; then
         EX_OWNER_ON="no"; EX_FOLDER_ON="no"; EX_FILE_ON="no"
         echo "Mode 2 selected (Delete DIRECTORY Without Exclusion): skipping all exclusion prompts."
         echo ""
       fi
- 
+
       if [[ "$MODE" == "3" ]]; then
         EX_OWNER_ON="no"; EX_FOLDER_ON="no"; EX_FILE_ON="no"
         echo ""
@@ -358,7 +369,7 @@
           *) echo "WARNING: Invalid choice [$EX_CHOICE]. Returning to main menu..."; echo ""; return 1 ;;
         esac
       fi
- 
+
       if [[ "$EX_OWNER_ON" == "yes" ]]; then
       ask_owner_or_yn "Exclude files owned by a user/UID?"
       if [[ "$OWNER_ANSWER_TYPE" == "OWNER" ]]; then
@@ -367,7 +378,7 @@
         read -r -p "Enter username (e.g. AP\\c270183) OR numeric UID (e.g. 14473): " EXCLUDE_OWNER_INPUT
         [[ -n "${EXCLUDE_OWNER_INPUT:-}" ]] || { msg_no_input; return 1; }
       fi
- 
+
       if [[ -n "${EXCLUDE_OWNER_INPUT:-}" ]]; then
         if validate_owner_or_uid "$EXCLUDE_OWNER_INPUT"; then
           EXCLUDE_OWNER_UID="$OWNER_UID_RESOLVED"
@@ -385,7 +396,7 @@
         fi
       fi
       fi   # end EX_OWNER_ON
- 
+
       # ---------- FOLDER EXCLUSIONS (BATCH) ----------
       if [[ "$EX_FOLDER_ON" == "yes" ]]; then
       if [[ "$MODE" == "3" ]]; then
@@ -402,15 +413,15 @@
           [[ -z "${dentry:-}" ]] && break
           FOLDER_INPUTS+=("$dentry")
         done
- 
+
         echo ""
         printf "%-45s %-12s %s\n" "Folder" "Found" "Resolved Path"
         printf "%-45s %-12s %s\n" "---------------------------------------------" "----------" "------------------------------"
- 
+
         for dentry in "${FOLDER_INPUTS[@]}"; do
           declare -a dm=()
           resolve_dirs_only "$BASE" "$dentry" dm
- 
+
           if [[ ${#dm[@]} -eq 0 ]]; then
             printf "%-45s %-12s %s\n" "$dentry" "NO" "-"
             WARNINGS+=("Folder exclude entry [$dentry] matched 0 directories under BASE.")
@@ -425,7 +436,7 @@
         echo ""
       fi
       fi   # end EX_FOLDER_ON
- 
+
       # ---------- FILE EXCLUSIONS (BATCH) ----------
       if [[ "$EX_FILE_ON" == "yes" ]]; then
       if [[ "$MODE" == "3" ]]; then
@@ -442,11 +453,11 @@
           [[ -z "${fentry:-}" ]] && break
           FILE_INPUTS+=("$fentry")
         done
- 
+
         echo ""
         printf "%-55s %-12s %s\n" "File Entry" "Found" "Resolved (first match)"
         printf "%-55s %-12s %s\n" "-------------------------------------------------------" "----------" "------------------------------"
- 
+
         for fentry in "${FILE_INPUTS[@]}"; do
           dref="$(resolve_directory_reference_from_file_entry "$BASE" "$fentry" || true)"
           if [[ -n "${dref:-}" ]]; then
@@ -454,10 +465,10 @@
             confirm_directory_exclusion_minimal "$dref"
             continue
           fi
- 
+
           declare -a fm=()
           resolve_files_only "$BASE" "$fentry" fm
- 
+
           if [[ ${#fm[@]} -eq 0 ]]; then
             printf "%-55s %-12s %s\n" "$fentry" "NO" "-"
             WARNINGS+=("File exclude entry [$fentry] matched 0 files under BASE.")
@@ -472,7 +483,7 @@
         echo ""
       fi
       fi   # end EX_FILE_ON
- 
+
       echo ""
       echo "================ EXCLUSIONS (RESOLVED) ================"
       if [[ -n "${EXCLUDE_OWNER_INPUT:-}" ]]; then
@@ -492,7 +503,7 @@
       print_list EXCLUDE_FILES
       echo "======================================================="
       echo ""
- 
+
       if [[ ${#WARNINGS[@]} -gt 0 ]]; then
         echo "WARNINGS detected during exclude resolution:"
         for w in "${WARNINGS[@]}"; do echo "  - $w"; done
@@ -515,27 +526,27 @@
         break
       fi
     done
- 
+
     FIND_CMD=(find "$BASE" -xdev -type f)
- 
+
     [[ -n "${EXCLUDE_OWNER_UID:-}" ]] && FIND_CMD+=( ! -uid "$EXCLUDE_OWNER_UID" )
     for xf in "${EXCLUDE_FILES[@]}"; do FIND_CMD+=( ! -path "$xf" ); done
     for xd in "${EXCLUDE_DIRS[@]}"; do FIND_CMD+=( ! -path "$xd" ! -path "$xd/*" ); done
- 
+
     FIND_CMD+=( -print0 )
     emit_candidates(){ "${FIND_CMD[@]}" 2>/dev/null || true; }
- 
+
     echo "Scanning candidate files (post-exclusions)..."
     TOTAL_FOUND=0
     while IFS= read -r -d '' _; do ((TOTAL_FOUND++)) || true; done < <(emit_candidates)
     echo "Total candidates (after exclusions): $TOTAL_FOUND"
     echo ""
- 
+
     [[ "$TOTAL_FOUND" -gt 0 ]] || { echo "No candidate files found. Returning to menu."; echo ""; return 1; }
- 
+
     CANDIDATE_LOG="/tmp/${SAFE_REQ}_candidate_files.txt"
     emit_candidates | tr '\0' '\n' > "$CANDIDATE_LOG"
- 
+
     echo "Candidate file list saved to:"
     echo "  $CANDIDATE_LOG"
     echo ""
@@ -545,28 +556,28 @@
       echo "  ... ($((TOTAL_FOUND - 20)) more files)"
     fi
     echo ""
- 
+
     echo "FINAL CONFIRMATION (two-step):"
     echo "1) Review the full list in: $CANDIDATE_LOG"
     echo "2) Type 'CONFIRM' to acknowledge the list is correct"
     echo "3) Then type 'YES' to execute deletion"
     echo ""
- 
+
     read -r -p "Type 'CONFIRM' to acknowledge candidate list (or anything else to abort): " ACK
     if [[ "${ACK:-}" != "CONFIRM" ]]; then
       echo "Deletion aborted by operator after review."
       echo ""
       return 1
     fi
- 
+
     confirm_yes_or_menu || return 1
- 
+
     echo ""
     echo "Deleting files now..."
     DELETED=0
     FAILED=0
     FAILED_LOG="$(mktemp "/tmp/isi_failed_${SAFE_REQ}.XXXX")"
- 
+
     if [[ "${WORM_CHECK_MODE^^}" == "STRICT" ]]; then
       echo "STRICT mode: prechecking WORM state using isi worm files view (may be slow)..."
       while IFS= read -r -d '' f; do
@@ -594,7 +605,7 @@
         fi
       done < <(emit_candidates)
     fi
- 
+
     echo ""
     echo "Deletion complete. Deleted=$DELETED Failed=$FAILED"
     if [[ "$FAILED" -gt 0 ]]; then
@@ -602,7 +613,7 @@
       echo "Showing first 20 failures (path<TAB>reason/state):"
       head -n 20 "$FAILED_LOG" | sed 's/^/  /'
     fi
- 
+
     if [[ "$MODE" == "2" ]]; then
       echo ""
       echo "Directory mode: removing EMPTY directories under BASE..."
@@ -633,63 +644,287 @@
       fi
       echo "Directory cleanup done."
     fi
- 
+
     echo ""
     echo "Returning to main menu..."
     echo ""
     return 0
   }
- 
+
+  # ============================================================================
+  # run_multi_dir_delete: Option 2 -> M (multi-folder, no exclusions)
+  # ============================================================================
+  run_multi_dir_delete() {
+    echo ""
+    echo "Enter FULL directory paths to delete, ONE PER LINE."
+    echo "Each directory will be wiped completely (no exclusions)."
+    echo "Blank line to finish input:"
+
+    declare -a MULTI_DIRS=()
+    declare -a INVALID_DIRS=()
+
+    while true; do
+      read -r md_line
+      [[ -z "${md_line:-}" ]] && break
+      md_line="${md_line#"${md_line%%[![:space:]]*}"}"
+      md_line="${md_line%"${md_line##*[![:space:]]}"}"
+      [[ -z "${md_line:-}" ]] && continue
+      MULTI_DIRS+=("$md_line")
+    done
+
+    if [[ ${#MULTI_DIRS[@]} -eq 0 ]]; then
+      echo "ERROR: No directory paths were entered. Returning to main menu..."
+      echo ""
+      return 1
+    fi
+
+    # ---------- VALIDATE EACH DIRECTORY ----------
+    echo ""
+    printf "%-65s %s\n" "Directory Path" "Status"
+    printf "%-65s %s\n" "-----------------------------------------------------------------" "----------"
+
+    declare -a VALID_DIRS=()
+    for md in "${MULTI_DIRS[@]}"; do
+      raw="$md"
+
+      # auto-prepend leading slash if user gave a relative path that exists from /
+      if [[ "$raw" != /* && -d "/$raw" ]]; then
+        raw="/$raw"
+      fi
+
+      if [[ ! -d "$raw" ]]; then
+        printf "%-65s %s\n" "$md" "INVALID / NOT FOUND"
+        INVALID_DIRS+=("$md")
+        continue
+      fi
+
+      resolved="$(cd "$raw" && pwd -P)"
+
+      if is_high_level_path "$resolved"; then
+        printf "%-65s %s\n" "$md" "REJECTED (high-level path)"
+        INVALID_DIRS+=("$md (high-level path: $resolved)")
+        continue
+      fi
+
+      printf "%-65s %s\n" "$md" "VALID"
+      append_unique VALID_DIRS "$resolved"
+    done
+
+    echo ""
+    echo "Summary: Total entered=${#MULTI_DIRS[@]}  Valid=${#VALID_DIRS[@]}  Invalid/Rejected=${#INVALID_DIRS[@]}"
+    echo ""
+
+    if [[ ${#VALID_DIRS[@]} -eq 0 ]]; then
+      echo "ERROR: No valid directories to delete. Returning to main menu..."
+      echo ""
+      return 1
+    fi
+
+    if [[ ${#INVALID_DIRS[@]} -gt 0 ]]; then
+      echo "WARNING: Some entries were invalid/rejected and will be SKIPPED:"
+      for bd in "${INVALID_DIRS[@]}"; do echo "  - $bd"; done
+      echo ""
+      echo "Choose next step:"
+      echo "  R) Re-enter the directory list"
+      echo "  C) Continue with the ${#VALID_DIRS[@]} valid director(ies) only"
+      echo "  A) Abort to main menu"
+      read -r -p "Enter choice (R/C/A): " MDCH
+      [[ -n "${MDCH:-}" ]] || { msg_no_input; return 1; }
+      case "${MDCH^^}" in
+        R) echo "Re-enter requested. Returning to main menu..."; echo ""; return 1 ;;
+        C) echo "Continuing with ${#VALID_DIRS[@]} valid director(ies)."; echo "" ;;
+        A) msg_abort; return 1 ;;
+        *) echo "Invalid choice. Returning to main menu..."; echo ""; return 1 ;;
+      esac
+    fi
+
+    # ---------- BUILD AGGREGATE CANDIDATE LIST ----------
+    MULTI_DIR_LOG="/tmp/${SAFE_REQ}_multi_dir_$(date +%Y%m%d_%H%M%S).txt"
+    : > "$MULTI_DIR_LOG"
+
+    declare -A DIR_COUNTS=()
+    TOTAL_CANDIDATES=0
+
+    echo "Scanning candidate files in each directory..."
+    for vd in "${VALID_DIRS[@]}"; do
+      cnt=0
+      while IFS= read -r -d '' f; do
+        echo "$f" >> "$MULTI_DIR_LOG"
+        ((cnt++)) || true
+      done < <(find "$vd" -xdev -type f -print0 2>/dev/null || true)
+      DIR_COUNTS["$vd"]="$cnt"
+      TOTAL_CANDIDATES=$((TOTAL_CANDIDATES + cnt))
+      echo "  $vd  -> $cnt file(s)"
+    done
+
+    echo ""
+    echo "Total candidate files across all directories: $TOTAL_CANDIDATES"
+    echo ""
+
+    if [[ "$TOTAL_CANDIDATES" -eq 0 ]]; then
+      echo "No candidate files found in any of the listed directories."
+      ask_yn_strict "Do you still want to proceed (will only attempt empty-dir cleanup)?"
+      [[ "$YN_ANSWER" == "y" ]] || { echo "Returning to main menu..."; echo ""; return 1; }
+    fi
+
+    echo "Aggregate candidate file list saved to:"
+    echo "  $MULTI_DIR_LOG"
+    echo ""
+    if [[ "$TOTAL_CANDIDATES" -gt 0 ]]; then
+      echo "Preview of candidate files (first 20):"
+      head -n 20 "$MULTI_DIR_LOG" | sed 's/^/  /'
+      if [[ "$TOTAL_CANDIDATES" -gt 20 ]]; then
+        echo "  ... ($((TOTAL_CANDIDATES - 20)) more files)"
+      fi
+      echo ""
+    fi
+
+    echo "Directories that will be wiped:"
+    for vd in "${VALID_DIRS[@]}"; do
+      echo "  - $vd  (${DIR_COUNTS[$vd]} file(s))"
+    done
+    echo ""
+
+    # ---------- TWO-STEP CONFIRM ----------
+    echo "FINAL CONFIRMATION (two-step):"
+    echo "1) Review the full list in: $MULTI_DIR_LOG"
+    echo "2) Type 'CONFIRM' to acknowledge the list is correct"
+    echo "3) Then type 'YES' to execute deletion"
+    echo ""
+
+    read -r -p "Type 'CONFIRM' to acknowledge candidate list (or anything else to abort): " MDACK
+    if [[ "${MDACK:-}" != "CONFIRM" ]]; then
+      echo "Deletion aborted by operator after review."
+      echo ""
+      return 1
+    fi
+
+    confirm_yes_or_menu || return 1
+
+    # ---------- LOOP DELETE PER DIRECTORY ----------
+    GRAND_DELETED=0
+    GRAND_FAILED=0
+    MD_FAILED_LOG="$(mktemp "/tmp/isi_multi_dir_failed_${SAFE_REQ}.XXXX")"
+
+    for vd in "${VALID_DIRS[@]}"; do
+      echo ""
+      echo "================================================================"
+      echo "Deleting directory: $vd"
+      echo "================================================================"
+
+      D_DELETED=0
+      D_FAILED=0
+
+      if [[ "${WORM_CHECK_MODE^^}" == "STRICT" ]]; then
+        echo "STRICT mode: prechecking WORM state using isi worm files view (may be slow)..."
+        while IFS= read -r -d '' f; do
+          state="$(worm_state_of "$f")"
+          if [[ "$state" == "COMMITTED" ]]; then
+            if isi worm files delete -f "$f"; then
+              ((D_DELETED++)) || true
+            else
+              ((D_FAILED++)) || true
+              printf '%s\t%s\n' "$f" "DELETE_FAILED" >> "$MD_FAILED_LOG"
+            fi
+          else
+            ((D_FAILED++)) || true
+            printf '%s\t%s\n' "$f" "$state" >> "$MD_FAILED_LOG"
+          fi
+        done < <(find "$vd" -xdev -type f -print0 2>/dev/null || true)
+      else
+        echo "FAST mode: attempting delete directly; failures are logged."
+        while IFS= read -r -d '' f; do
+          if isi worm files delete -f "$f"; then
+            ((D_DELETED++)) || true
+          else
+            ((D_FAILED++)) || true
+            printf '%s\t%s\n' "$f" "DELETE_FAILED_OR_NOT_COMMITTED" >> "$MD_FAILED_LOG"
+          fi
+        done < <(find "$vd" -xdev -type f -print0 2>/dev/null || true)
+      fi
+
+      echo ""
+      echo "Directory result: $vd  Deleted=$D_DELETED Failed=$D_FAILED"
+
+      # empty dir cleanup for this directory
+      echo "Removing EMPTY directories under: $vd"
+      find "$vd" -xdev -type d -empty -mindepth 1 -delete 2>/dev/null || true
+      echo "Attempting to remove directory itself if empty: $vd"
+      rmdir "$vd" 2>/dev/null || true
+
+      GRAND_DELETED=$((GRAND_DELETED + D_DELETED))
+      GRAND_FAILED=$((GRAND_FAILED + D_FAILED))
+    done
+
+    echo ""
+    echo "================================================================"
+    echo "MULTI-DIRECTORY DELETION SUMMARY"
+    echo "================================================================"
+    echo "Directories processed : ${#VALID_DIRS[@]}"
+    echo "Total deleted files   : $GRAND_DELETED"
+    echo "Total failed files    : $GRAND_FAILED"
+    if [[ "$GRAND_FAILED" -gt 0 ]]; then
+      echo "Failures saved to     : $MD_FAILED_LOG"
+      echo "First 20 failures (path<TAB>reason/state):"
+      head -n 20 "$MD_FAILED_LOG" | sed 's/^/  /'
+    fi
+    echo "================================================================"
+    echo ""
+    echo "Returning to main menu..."
+    echo ""
+    return 0
+  }
+
+  # ============================================================================
+  # run_user_delete: Option 4-style by-user delete (kept from previous version)
+  # ============================================================================
   run_user_delete() {
     read -r -p "Enter the BASE folder path: " BASE
     [[ -n "${BASE:-}" ]] || { msg_no_input; return 1; }
- 
+
     if [[ "$BASE" != /* && -d "/$BASE" ]]; then
       BASE="/$BASE"
     fi
- 
+
     [[ -d "$BASE" ]] || { echo "ERROR: Base path does not exist or is not a directory: $BASE"; echo ""; return 1; }
     BASE="$(cd "$BASE" && pwd -P)"
- 
-    case "$BASE" in
-      "/"|"/ifs"|"/ifs/"|"/ifs/data"|"/ifs/data/")
-        echo "ERROR: Refusing to operate on high-level path: $BASE. Provide a deeper folder."
-        echo ""
-        return 1
-        ;;
-    esac
- 
+
+    if is_high_level_path "$BASE"; then
+      echo "ERROR: Refusing to operate on high-level path: $BASE. Provide a deeper folder."
+      echo ""
+      return 1
+    fi
+
     echo ""
     echo "BASE selected: $BASE"
     echo ""
- 
+
     read -r -p "Enter TARGET username (e.g. AP\\c270183) OR numeric UID (mandatory): " TARGET_OWNER_INPUT
     [[ -n "${TARGET_OWNER_INPUT:-}" ]] || { msg_no_input; return 1; }
- 
+
     if ! validate_owner_or_uid "$TARGET_OWNER_INPUT"; then
       echo "ERROR: Target user/UID [$TARGET_OWNER_INPUT] does not resolve to a valid user/UID on this system."
       echo "Returning to main menu..."
       echo ""
       return 1
     fi
- 
+
     TARGET_UID="$OWNER_UID_RESOLVED"
     TARGET_NAME="$OWNER_NAME_RESOLVED"
- 
+
     echo "Target user verification: YES -> [$TARGET_OWNER_INPUT] resolved as user [$TARGET_NAME] (uid=$TARGET_UID)"
     echo ""
- 
+
     target_match="$(count_owner_matches_by_uid "$BASE" "$TARGET_UID")"
     echo "Target ownership scan: found $target_match file(s) under BASE owned by uid=$TARGET_UID"
     echo ""
     [[ "$target_match" -gt 0 ]] || { echo "No files owned by uid=$TARGET_UID under BASE. Returning to menu."; echo ""; return 1; }
- 
+
     while true; do
       declare -a EXCLUDE_DIRS=()
       declare -a EXCLUDE_FILES=()
       declare -a WARNINGS=()
- 
-      # ---------- FOLDER EXCLUSIONS (BATCH) ----------
+
       ask_yn_strict "Do you want to EXCLUDE folder(s) (entire subtree) within BASE?"
       if [[ "$YN_ANSWER" == "y" ]]; then
         echo "Enter folder exclusion entries (FULL path, relative-to-BASE, or folder name)."
@@ -700,15 +935,15 @@
           [[ -z "${dentry:-}" ]] && break
           FOLDER_INPUTS+=("$dentry")
         done
- 
+
         echo ""
         printf "%-45s %-12s %s\n" "Folder" "Found" "Resolved Path"
         printf "%-45s %-12s %s\n" "---------------------------------------------" "----------" "------------------------------"
- 
+
         for dentry in "${FOLDER_INPUTS[@]}"; do
           declare -a dm=()
           resolve_dirs_only "$BASE" "$dentry" dm
- 
+
           if [[ ${#dm[@]} -eq 0 ]]; then
             printf "%-45s %-12s %s\n" "$dentry" "NO" "-"
             WARNINGS+=("Folder exclude entry [$dentry] matched 0 directories under BASE.")
@@ -722,8 +957,7 @@
         done
         echo ""
       fi
- 
-      # ---------- FILE EXCLUSIONS (BATCH) ----------
+
       ask_yn_strict "Do you want to EXCLUDE file(s) within BASE? (FULL path or filename/partial under BASE)"
       if [[ "$YN_ANSWER" == "y" ]]; then
         echo "Enter file exclusion entries (FULL path, relative-to-BASE, or filename/partial token)."
@@ -734,11 +968,11 @@
           [[ -z "${fentry:-}" ]] && break
           FILE_INPUTS+=("$fentry")
         done
- 
+
         echo ""
         printf "%-55s %-12s %s\n" "File Entry" "Found" "Resolved (first match)"
         printf "%-55s %-12s %s\n" "-------------------------------------------------------" "----------" "------------------------------"
- 
+
         for fentry in "${FILE_INPUTS[@]}"; do
           dref="$(resolve_directory_reference_from_file_entry "$BASE" "$fentry" || true)"
           if [[ -n "${dref:-}" ]]; then
@@ -746,10 +980,10 @@
             confirm_directory_exclusion_minimal "$dref"
             continue
           fi
- 
+
           declare -a fm=()
           resolve_files_only "$BASE" "$fentry" fm
- 
+
           if [[ ${#fm[@]} -eq 0 ]]; then
             printf "%-55s %-12s %s\n" "$fentry" "NO" "-"
             WARNINGS+=("File exclude entry [$fentry] matched 0 files under BASE.")
@@ -763,7 +997,7 @@
         done
         echo ""
       fi
- 
+
       echo ""
       echo "================ USER DELETE SCOPE (RESOLVED) ================"
       echo "TARGET user: $TARGET_NAME (uid=$TARGET_UID) -> deleting ONLY files owned by this UID under BASE + subdirectories"
@@ -775,7 +1009,7 @@
       print_list EXCLUDE_FILES
       echo "=============================================================="
       echo ""
- 
+
       if [[ ${#WARNINGS[@]} -gt 0 ]]; then
         echo "WARNINGS detected during exclude resolution:"
         for w in "${WARNINGS[@]}"; do echo "  - $w"; done
@@ -798,26 +1032,26 @@
         break
       fi
     done
- 
+
     FIND_CMD=(find "$BASE" -xdev -type f -uid "$TARGET_UID")
- 
+
     for xf in "${EXCLUDE_FILES[@]}"; do FIND_CMD+=( ! -path "$xf" ); done
     for xd in "${EXCLUDE_DIRS[@]}"; do FIND_CMD+=( ! -path "$xd" ! -path "$xd/*" ); done
- 
+
     FIND_CMD+=( -print0 )
     emit_candidates(){ "${FIND_CMD[@]}" 2>/dev/null || true; }
- 
+
     echo "Scanning candidate files (owned by $TARGET_NAME uid=$TARGET_UID, post-exclusions)..."
     TOTAL_FOUND=0
     while IFS= read -r -d '' _; do ((TOTAL_FOUND++)) || true; done < <(emit_candidates)
     echo "Total candidates: $TOTAL_FOUND"
     echo ""
- 
+
     [[ "$TOTAL_FOUND" -gt 0 ]] || { echo "No candidate files found after exclusions. Returning to menu."; echo ""; return 1; }
- 
+
     CANDIDATE_LOG="/tmp/${SAFE_REQ}_uid${TARGET_UID}_candidate_files.txt"
     emit_candidates | tr '\0' '\n' > "$CANDIDATE_LOG"
- 
+
     echo "Candidate file list saved to:"
     echo "  $CANDIDATE_LOG"
     echo ""
@@ -827,28 +1061,28 @@
       echo "  ... ($((TOTAL_FOUND - 20)) more files)"
     fi
     echo ""
- 
+
     echo "FINAL CONFIRMATION (two-step):"
     echo "1) Review the full list in: $CANDIDATE_LOG"
     echo "2) Type 'CONFIRM' to acknowledge the list is correct"
     echo "3) Then type 'YES' to execute deletion"
     echo ""
- 
+
     read -r -p "Type 'CONFIRM' to acknowledge candidate list (or anything else to abort): " ACK
     if [[ "${ACK:-}" != "CONFIRM" ]]; then
       echo "Deletion aborted by operator after review."
       echo ""
       return 1
     fi
- 
+
     confirm_yes_or_menu || return 1
- 
+
     echo ""
     echo "Deleting files now (TARGET uid=$TARGET_UID)..."
     DELETED=0
     FAILED=0
     FAILED_LOG="$(mktemp "/tmp/isi_failed_${SAFE_REQ}_uid${TARGET_UID}.XXXX")"
- 
+
     if [[ "${WORM_CHECK_MODE^^}" == "STRICT" ]]; then
       echo "STRICT mode: prechecking WORM state using isi worm files view (may be slow)..."
       while IFS= read -r -d '' f; do
@@ -876,7 +1110,7 @@
         fi
       done < <(emit_candidates)
     fi
- 
+
     echo ""
     echo "Deletion complete. Deleted=$DELETED Failed=$FAILED"
     if [[ "$FAILED" -gt 0 ]]; then
@@ -885,7 +1119,7 @@
       head -n 20 "$FAILED_LOG" | sed 's/^/  /'
     fi
     echo ""
- 
+
     ask_yn_strict "Do you want to remove EMPTY directories under BASE after deletion?"
     if [[ "$YN_ANSWER" == "y" ]]; then
       echo "Removing empty directories under BASE (excluding excluded subtrees)..."
@@ -896,12 +1130,12 @@
       echo "Empty directory cleanup done."
       echo ""
     fi
- 
+
     echo "Returning to main menu..."
     echo ""
     return 0
   }
- 
+
   # ---------- MAIN MENU ----------
   while true; do
     echo "==================== MAIN MENU ===================="
@@ -913,7 +1147,7 @@
     echo "==================================================="
     read -r -p "Enter choice (0/1/2/3/4): " MODE
     [[ -n "${MODE:-}" ]] || { msg_no_input; continue; }
- 
+
     case "$MODE" in
       0)
         echo ""
@@ -1097,7 +1331,27 @@
         esac
         ;;
       1) run_base_delete "1" "FILES_ONLY" || true ;;
-      2) run_base_delete "2" "DELETE_DIRECTORY" || true ;;
+      2)
+        echo ""
+        echo "---------- DIRECTORY DELETE SUB-MENU (no exclusions) ----------"
+        echo "  S) Delete a SINGLE directory (one full path - wipes everything)"
+        echo "  M) Delete MULTIPLE directories (enter one full path per line)"
+        echo "  B) Back to main menu"
+        echo "---------------------------------------------------------------"
+        read -r -p "Enter choice (S/M/B): " DIRSUB
+        [[ -n "${DIRSUB:-}" ]] || { msg_no_input; continue; }
+
+        case "${DIRSUB^^}" in
+          S) run_base_delete "2" "DELETE_DIRECTORY" || true ;;
+          M) run_multi_dir_delete || true ;;
+          B) echo "Returning to main menu..."; echo ""; continue ;;
+          *)
+            echo "WARNING: Invalid sub-menu choice [$DIRSUB]. Returning to main menu..."
+            echo ""
+            continue
+            ;;
+        esac
+        ;;
       3) run_base_delete "3" "DELETE_DIRECTORY_WITH_EXCLUSION" || true ;;
       4)
         echo "Exiting. Log file: $LOGFILE"
